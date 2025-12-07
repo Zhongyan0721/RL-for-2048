@@ -1,108 +1,161 @@
-import torch
-import numpy as np
-from env_2048 import Game2048Env
-from ppo import PPO, Memory
+#!/usr/bin/env python
+"""
+DQN Training Script for 2048 Game
+
+Usage:
+    python train.py
+"""
+
 import os
+
+import numpy as np
+import torch
 from tqdm import tqdm
-import matplotlib.pyplot as plt
+import wandb
 
-def train():
-    env = Game2048Env()
+from game_env import Game2048Env
+from dqn_model import DQNAgent
+from config import WANDB_API_KEY, WANDB_PROJECT, WANDB_ENTITY
+
+
+# ============== CONFIGURATION ==============
+SEED = 42
+SAVE_DIR = "checkpoints"
+
+config = {
+    "learning_rate": 1e-4,
+    "gamma": 0.99,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.01,
+    "epsilon_decay": 0.995,
+    "buffer_size": 100000,
+    "batch_size": 64,
+    "target_update_freq": 1000,
+    "num_episodes": 10000,
+    "max_steps_per_episode": 10000,
+    "seed": SEED
+}
+# ===========================================
+
+
+def setup_seeds(seed):
+    """Set random seeds for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+
+def train_dqn(agent, env, config):
+    """Train the DQN agent."""
+    num_episodes = config["num_episodes"]
+    max_steps = config["max_steps_per_episode"]
     
-    # --- Hyperparameters Tuning Section ---
-    max_episodes = 100000   # Increase: 2048 needs lots of experience
-    max_timesteps = 1000    # Max timesteps per episode
-    update_timestep = 4000  # Increase: More data per update = more stable gradient
-    lr = 5e-5               # Start higher, decay later
-    lr_min = 1e-5           # Minimum learning rate
-    gamma = 0.995
-    epochs = 10             # Increase: Squeeze more out of each batch
-    eps_clip = 0.1
-    # --------------------------------------
-    
-    agent = PPO(env, lr, gamma, eps_clip, epochs)
-    memory = Memory()
-    
-    timestep = 0
-    
-    # Logging
-    log_interval = 50 # Log less frequently
-    running_reward = 0
-    running_score = 0
-    running_max_tile = 0
-    
-    rewards_history = []
-    scores_history = []
-    
-    print(f"Starting training for {max_episodes} episodes...")
-    
-    for i_episode in tqdm(range(1, max_episodes + 1)):
+    for episode in tqdm(range(num_episodes), desc="Training"):
         state, _ = env.reset()
-        current_ep_reward = 0
+        episode_reward = 0
+        episode_loss = []
         
-        # Linear Learning Rate Decay
-        # new_lr = lr - (lr - lr_min) * (i_episode / max_episodes)
-        # new_lr = max(new_lr, lr_min)
-        for param_group in agent.optimizer.param_groups:
-            param_group['lr'] = lr
-
-        for t in range(max_timesteps):
-            timestep += 1
+        for step in range(max_steps):
+            action = agent.select_action(state, training=True)
+            next_state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
             
-            # Run old policy
-            action, log_prob = agent.select_action(state)
-            state_tensor = torch.FloatTensor(state)
-            memory.states.append(state_tensor)
-            memory.actions.append(action)
-            memory.logprobs.append(log_prob)
+            agent.store_transition(state, action, reward, next_state, done)
             
-            state, reward, done, truncated, info = env.step(action)
+            loss = agent.learn()
+            if loss is not None:
+                episode_loss.append(loss)
             
-            # Saving reward and is_terminals
-            memory.rewards.append(reward)
-            memory.is_terminals.append(done)
-            
-            current_ep_reward += reward
-            
-            # Update if its time
-            if timestep % update_timestep == 0:
-                agent.update(memory)
-                memory.clear_memory()
-                timestep = 0
+            episode_reward += reward
+            state = next_state
             
             if done:
                 break
         
-        running_reward += current_ep_reward
-        running_score += info['score']
-        running_max_tile = max(running_max_tile, info['max_tile'])
+        agent.decay_epsilon()
         
-        if i_episode % log_interval == 0:
-            avg_reward = running_reward / log_interval
-            avg_score = running_score / log_interval
-            rewards_history.append(avg_reward)
-            scores_history.append(avg_score)
-            
-            print(f'Episode {i_episode} \t Avg Reward: {avg_reward:.2f} \t Avg Score: {avg_score:.2f} \t Max Tile: {running_max_tile} \t LR: {lr:.6f}')
-            running_reward = 0
-            running_score = 0
-            running_max_tile = 0
-            
-            # Save model
-            if i_episode % 1000 == 0:
-                torch.save(agent.policy.state_dict(), f'ppo_2048_{i_episode}.pth')
+        # Log to wandb
+        metrics = {
+            "episode": episode,
+            "episode_reward": episode_reward,
+            "episode_score": info['score'],
+            "max_tile": info['max_tile'],
+            "moves": info['moves'],
+            "epsilon": agent.epsilon,
+            "buffer_size": len(agent.replay_buffer)
+        }
+        
+        if episode_loss:
+            metrics["avg_loss"] = np.mean(episode_loss)
+        
+        wandb.log(metrics)
+        
+        # Print progress every 100 episodes
+        if (episode + 1) % 100 == 0:
+            print(f"\nEpisode {episode + 1}/{num_episodes}")
+            print(f"  Score: {info['score']}, Max Tile: {info['max_tile']}")
+            print(f"  Epsilon: {agent.epsilon:.4f}")
+        
+        # Save checkpoint every 1000 episodes
+        if (episode + 1) % 1000 == 0:
+            checkpoint_path = os.path.join(SAVE_DIR, f"checkpoint_episode_{episode + 1}.pt")
+            agent.save(checkpoint_path)
+            print(f"  Saved checkpoint: {checkpoint_path}")
 
-    # Save final model
-    torch.save(agent.policy.state_dict(), 'ppo_2048_final.pth')
+
+def main():
+    # Setup
+    setup_seeds(SEED)
+    os.makedirs(SAVE_DIR, exist_ok=True)
     
-    # Plot results
-    plt.figure()
-    plt.plot(scores_history)
-    plt.title('Average Score')
-    plt.xlabel('Interval')
-    plt.ylabel('Score')
-    plt.savefig('training_score.png')
-    print("Training finished. Model and plot saved.")
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    
+    # Initialize WandB
+    wandb.login(key=WANDB_API_KEY)
+    run = wandb.init(
+        project=WANDB_PROJECT,
+        entity=WANDB_ENTITY,
+        config=config,
+        name="dqn-baseline",
+        tags=["dqn", "baseline", "2048"]
+    )
+    print(f"WandB run initialized: {run.name}")
+    print(f"Run ID: {run.id}")
+    print(f"View at: {run.url}")
+    
+    # Create environment and agent
+    env = Game2048Env()
+    agent = DQNAgent(
+        state_shape=(4, 4),
+        num_actions=4,
+        lr=config["learning_rate"],
+        gamma=config["gamma"],
+        epsilon_start=config["epsilon_start"],
+        epsilon_end=config["epsilon_end"],
+        epsilon_decay=config["epsilon_decay"],
+        buffer_size=config["buffer_size"],
+        batch_size=config["batch_size"],
+        target_update_freq=config["target_update_freq"]
+    )
+    
+    print(f"Agent using device: {agent.device}")
+    
+    # Train
+    print(f"\nStarting training for {NUM_EPISODES} episodes...\n")
+    train_dqn(agent, env, config)
+    print("\nTraining complete!")
+    
+    # Save final model
+    final_model_path = "dqn_final_model.pt"
+    agent.save(final_model_path)
+    print(f"Final model saved: {final_model_path}")
+    
+    # Finish WandB
+    wandb.finish()
+    print("WandB run finished!")
 
-if __name__ == '__main__':
-    train()
+
+if __name__ == "__main__":
+    main()
