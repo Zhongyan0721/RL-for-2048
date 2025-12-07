@@ -10,12 +10,26 @@ This repository contains multiple Reinforcement Learning implementations for the
 | `dqn` | **DQN** | Deep Q-Network |
 | `hdqn` | **HDQN** | Horizon Deep Q-Network |
 
-## Installation
+## Setup
 
-```bash
-pip install -r requirements.txt
-```
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
+2. **Configure Weights & Biases (for DQN/HDQN branches):**
+   
+   Create a `config.py` file in the project root:
+   ```python
+   WANDB_API_KEY = "your-wandb-api-key-here"
+   WANDB_PROJECT = "2048-rl"
+   WANDB_ENTITY = "your-wandb-username"
+   ```
+   
+   - Get your API key from [https://wandb.ai/authorize](https://wandb.ai/authorize)
+   - Replace the placeholder values with your actual credentials
+   - **Note:** `config.py` is in `.gitignore` to prevent accidentally committing your API key
+   
 ---
 
 ## PPO (main branch)
