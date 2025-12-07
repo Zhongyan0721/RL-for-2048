@@ -46,6 +46,7 @@ wandb/
 checkpoints/
 models/
 best_checkpoints/
+.ipynb_checkpoints/
 
 # IDE
 .vscode/
